@@ -214,6 +214,22 @@ class TreeTest(unittest.TestCase):
                          ["A", "b", "c"])
 
 
+class SafeTest(unittest.TestCase):
+    def test_plain_and_unicode_unchanged(self):
+        self.assertEqual(lc.safe("café/ü file.txt"), "café/ü file.txt")
+
+    def test_control_chars_escaped(self):
+        self.assertEqual(lc.safe("a\x1b[31mb\n\x07"), "a\\x1b[31mb\\x0a\\x07")
+
+    def test_format_chars_escaped(self):
+        # U+202E RIGHT-TO-LEFT OVERRIDE can visually disguise names.
+        self.assertEqual(lc.safe("evil‮txt.exe"), "evil\\u202etxt.exe")
+
+    def test_surrogateescape_bytes_shown_as_raw_byte(self):
+        name = b"bad\xff.txt".decode("utf-8", "surrogateescape")
+        self.assertEqual(lc.safe(name), "bad\\xff.txt")
+
+
 class FmtTest(unittest.TestCase):
     def test_thousands_separator(self):
         self.assertEqual(lc.fmt(1234567), "1,234,567")
@@ -378,6 +394,17 @@ class CliEdgeCasesTest(TempDirTest):
         self.assertIn("usage: linecount", r.stdout)
         self.assertEqual(r.stdout, run_cli("--help").stdout)
 
+    def test_escape_sequences_in_names_are_not_emitted(self):
+        evil = "x\x1b]0;pwned\x07\x1b[2J.txt"
+        write(self.tmp, evil, lines(2))
+        write(self.tmp, "d\x1b[31m/a.txt", lines(1))
+        for args in ([self.tmp], ["--tree", self.tmp],
+                     [os.path.join(self.tmp, evil)]):
+            out = run_cli(*args).stdout
+            self.assertNotIn("\x1b", out, args)
+            self.assertNotIn("\x07", out, args)
+        self.assertIn("x\\x1b]0;pwned\\x07", run_cli(self.tmp).stdout)
+
     def test_self_test_reports_missing_suite(self):
         r = run_cli("--self-test",
                     env={"LINECOUNT_TESTS": os.path.join(self.tmp, "none.py")})
@@ -460,6 +487,17 @@ class CliGitTest(TempDirTest):
         self.assertNotIn("lib/", rows)
         rows, _, _ = flat_rows(run_cli("-x", "./lib", self.tmp).stdout)
         self.assertNotIn("lib/", rows)
+
+    def test_repo_fsmonitor_config_is_not_executed(self):
+        # A hostile checkout's .git/config can name a program for git to
+        # run; counting lines must not trigger it.
+        marker = os.path.join(self.tmp, "PWNED")
+        self.git("add", "app.py")  # before the hook, or git add trips it
+        self.git("config", "core.fsmonitor", f"touch '{marker}'; false")
+        r = run_cli(self.tmp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual(flat_rows(r.stdout)[0]["app.py"], 10)
 
     def test_file_starting_with_double_dot_is_counted(self):
         # Paths starting with ".." are dropped as "outside the target"; a

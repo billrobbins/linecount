@@ -20,6 +20,7 @@ import argparse
 import os
 import subprocess
 import sys
+import unicodedata
 from fnmatch import fnmatch
 
 # Directories skipped when NOT using git's ignore rules (non-repo or --all-off
@@ -146,9 +147,11 @@ def collect_git(target):
     minus ignored). Returns a list of relative paths, or None if `target`
     isn't inside a git work tree (or git is unavailable)."""
     try:
+        # core.fsmonitor in a repo's .git/config names a program git will
+        # run; an untrusted checkout must not get code execution from us.
         proc = subprocess.run(
-            ["git", "ls-files", "--cached", "--others",
-             "--exclude-standard", "-z"],
+            ["git", "-c", "core.fsmonitor=false", "ls-files", "--cached",
+             "--others", "--exclude-standard", "-z"],
             cwd=target, capture_output=True,
         )
     except (FileNotFoundError, OSError):
@@ -243,8 +246,24 @@ def fmt(n):
     return f"{n:,}"
 
 
+def safe(s):
+    """Escape control/format chars (and undecodable-byte surrogates) so a
+    hostile file name can't inject terminal escape sequences."""
+    out = []
+    for ch in s:
+        if unicodedata.category(ch) in ("Cc", "Cf", "Cs"):
+            o = ord(ch)
+            if 0xDC80 <= o <= 0xDCFF:  # surrogateescape'd raw byte
+                o -= 0xDC00
+            out.append(f"\\x{o:02x}" if o < 0x100 else f"\\u{o:04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def label(node):
-    return node["name"] + "/" if node["is_dir"] else node["name"]
+    name = safe(node["name"])
+    return name + "/" if node["is_dir"] else name
 
 
 def render_flat(root, by_name, theme):
@@ -381,10 +400,10 @@ def main(argv=None):
     # A single file: just count it and exit.
     if os.path.isfile(target):
         if is_binary(target):
-            print(f"{args.path}: binary file (skipped)")
+            print(f"{safe(args.path)}: binary file (skipped)")
             return 0
         n = count_lines(target)
-        print(f"{os.path.basename(target)}  {fmt(n or 0)}")
+        print(f"{safe(os.path.basename(target))}  {fmt(n or 0)}")
         return 0
 
     is_excluded = build_excluder(target, args.exclude)
